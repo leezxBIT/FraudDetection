@@ -12,7 +12,7 @@ import pdb
 
 from paras import args
 from utils import seed_all, load_data, data_preprocess
-from models import LINKX, GCN
+from models import LINKX, GCN, Ours
 from plot import *
 from loss import *
 
@@ -20,18 +20,17 @@ def train(loader):
     start_time = time.time()
     model.train()
     l = tqdm(loader)
-    loss_accum = 0
 
     for step, batch in enumerate(l):
         batch = batch.to(device)
         batch_train_idx = batch.train_mask.to(torch.bool)
         optimizer.zero_grad()
 
-        pred = model(batch)
-        temp_loss = criterion(pred[batch_train_idx], batch.y[batch_train_idx].squeeze())
+        pred, xA, xX = model(batch)
+        loss = criterion(pred[batch_train_idx], batch.y[batch_train_idx].squeeze())
+        mi = model.train_mi(xA, xX)
+        loss = loss + mi
         # pdb.set_trace()
-        loss = temp_loss
-        loss_accum += temp_loss.detach().cpu().item()
 
         optimizer.zero_grad()
         loss.backward()
@@ -55,7 +54,8 @@ def eval(data, test):
         y_true = data.y[idx].cpu().numpy()
 
     with torch.no_grad():
-        y_preds = torch.sigmoid(model(data))[idx].cpu().numpy()
+        y_preds, _, _ = model(data)
+        y_preds = torch.sigmoid(y_preds)[idx].cpu().numpy()
     
     
     auc_gnn = roc_auc_score(y_true, y_preds[:,1].tolist())
@@ -81,6 +81,8 @@ if __name__ == '__main__':
         model = LINKX(data.num_node_features, args.hidden_dim, 2, args.num_layers, data.num_nodes).to(device)
     elif args.model == 'gcn':
         model = GCN(data.num_node_features, args.hidden_dim, 2).to(device)
+    elif args.model == 'Ours':
+        model = Ours(data.num_node_features, args.hidden_dim, 2, args.num_layers, data.num_nodes, tau=0.1).to(device)
     # === TODO: More model needed ===
 
     # === Training Loss ===

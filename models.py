@@ -7,6 +7,53 @@ from torch_geometric.nn.conv.gcn_conv import gcn_norm
 import numpy as np
 import pdb
 
+
+class Ours(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers, num_nodes, dropout=.5, cache=False, inner_activation=False, inner_dropout=False, init_layers_A=1, init_layers_X=1, 
+                    tau=0.1):
+        super(Ours, self).__init__()
+        self.mlpA = MLP(num_nodes, hidden_channels, hidden_channels, init_layers_A, dropout=0)
+        self.mlpX = MLP(in_channels, hidden_channels, hidden_channels, init_layers_A, dropout=0)
+        self.W = nn.Linear(2*hidden_channels, hidden_channels)
+        self.mlp_final = MLP(hidden_channels, hidden_channels, out_channels, num_layers, dropout=dropout)
+        self.MI_NCE = MI_NCE(hidden_channels, tau)
+        self.num_nodes = num_nodes
+        self.inner_dropout = inner_dropout
+        self.inner_activation = inner_activation
+
+    def reset_parameters(self):
+        self.mlpA.reset_parameters()	
+        self.mlpX.reset_parameters()
+        self.W.reset_parameters()
+        self.mlp_final.reset_parameters()
+
+    def train_mi(self, xA, xX):
+        mi = self.MI_NCE(xA, xX)
+        return mi
+
+    def forward(self, data):
+        m = data.num_nodes
+        x = data.x
+        row, col = data.edge_index	
+        row = row-row.min()
+        A = SparseTensor(row=row, col=col,	
+                 sparse_sizes=(m, self.num_nodes)
+                        ).to_torch_sparse_coo_tensor()
+        xA = self.mlpA(A)
+        xX = self.mlpX(x)
+
+        x = torch.cat((xA, xX), axis=-1)
+        x = self.W(x)
+        if self.inner_dropout:
+            x = F.dropout(x)
+        if self.inner_activation:
+            x = F.relu(x)
+        x = F.relu(x + xA + xX)
+        x = self.mlp_final(x)
+
+        return x, xA, xX
+
+
 class LINKX(nn.Module):	
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, num_nodes, dropout=.5, cache=False, inner_activation=False, inner_dropout=False, init_layers_A=1, init_layers_X=1):
         super(LINKX, self).__init__()	
@@ -124,3 +171,44 @@ class GCN(nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.convs[-1](x, data.edge_index)
         return x
+
+
+class MI_NCE(nn.Module):
+    def __init__(self, mi_hid_1, tau):
+        super(MI_NCE, self).__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(mi_hid_1, mi_hid_1),
+            nn.ELU(),
+            nn.Linear(mi_hid_1, mi_hid_1)
+        )
+        self.con = Contrast(tau)
+
+    def forward(self, feat1, feat2):   
+        feat1 = self.proj(feat1)
+        feat2 = self.proj(feat2)
+        mi = self.con.cal(feat1, feat2)
+        return mi
+
+
+class Contrast:
+    def __init__(self, tau):
+        self.tau = tau
+
+    def sim(self, z1, z2):
+        z1_norm = torch.norm(z1, dim=-1, keepdim=True)
+        z2_norm = torch.norm(z2, dim=-1, keepdim=True)
+        dot_numerator = torch.mm(z1, z2.t())
+        dot_denominator = torch.mm(z1_norm, z2_norm.t())
+        sim_matrix = torch.exp(dot_numerator / dot_denominator / self.tau)
+        return sim_matrix
+
+    def cal(self, z1_proj, z2_proj):
+        matrix_z1z2 = self.sim(z1_proj, z2_proj)
+        matrix_z2z1 = matrix_z1z2.t()
+
+        matrix_z1z2 = matrix_z1z2 / (torch.sum(matrix_z1z2, dim=1).view(-1, 1) + 1e-8)
+        lori_v1v2 = -torch.log(matrix_z1z2.diag()+1e-8).mean()
+
+        matrix_z2z1 = matrix_z2z1 / (torch.sum(matrix_z2z1, dim=1).view(-1, 1) + 1e-8)
+        lori_v2v1 = -torch.log(matrix_z2z1.diag()+1e-8).mean()
+        return (lori_v1v2 + lori_v2v1) / 2
